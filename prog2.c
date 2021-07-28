@@ -119,22 +119,16 @@ void B_output(message)  /* need be completed only for extra credit */
 void A_input(packet)
   struct pkt packet;
 {
-  // check if the packet is an ACK or NAK
-  int response = *packet.payload;
 
-  // if ACK, stop timer and wait for next packet from layer 5
-  if (response == 1) {
-    // handle warning of duplicate acks, ie, when a pkt is lost 2 ACKs may be rcvd later, which causes a nonexistent
-    // timer to be stopped
-    // this could be solved by adding acknums to easily check if duplicate acks were received (would have 0,0 or 1,1)
+  // if acknum != next seqnum, ie, it is equal to last sent pkt seqnum, stop timer
+  if (packet.acknum != A.nextseq) {
     stoptimer(0);
-    printf("ACK received\n");
+    printf("ACK received w/acknum=%d\n", packet.acknum);
     printf("Waiting to send next packet...\n");
   } else {
-    // if NAK OR corrupted => do nothing and wait for timeout
-    printf("Corrupted pkt || NAK Received: %d\n", response);
-    printf("Waiting for timeout\n");
     // could stop timer here, then retransmit immediately, and start new timer
+    printf("Corrupted pkt || out of order ACK Received\n");
+    printf("Waiting for timeout\n");
   }
   printf("---------------------");
 }
@@ -170,33 +164,28 @@ void B_input(packet)
   int result = compute_checksum(packet) + packet.checksum;
   printf("Result checksum is: %d\n", result);
 
-  // if result is correct and has expected seqnum, pass msg to layer5 and send ACK
+  // if uncorrupted and has expected seqnum, pass msg to layer5 and send ACK w/acknum=seqnum
   if (result == -1 && packet.seqnum == B.expectedseq) {
     // send message to layer 5
     tolayer5(1, *packet.payload);
 
-    // send ACK back to sender
-    struct pkt ACK = {0, 0, 0, 1};
+    struct pkt ACK = {0, packet.seqnum, 0, 1};
     tolayer3(1, ACK);
 
     update_state_B(packet);
 
     printf("Pkt received with seqnum: %d\n", packet.seqnum);
-    printf("DELIVERED TO LAYER 5 and sending ACK\n");
-  } else if (result == -1 && packet.seqnum != B.expectedseq) {
-    // drop pkt and send ACK
-    struct pkt ACK = {0,0,0,1};
+    printf("DELIVERED TO LAYER 5 and sending ACK w/acknum=%d\n", packet.seqnum);
+  } else {
+    // pkt is either corrupted OR out-of-order
+    // drop pkt and send ACK w/acknum=complement of expected seqnum
+    int acknum = (B.expectedseq + 1) % 2;
+    struct pkt ACK = {0, acknum, 0, 1};
     tolayer3(1, ACK);
     
-    printf("Out of order pkt with seqnum: %d\n", packet.seqnum);
-    printf("Dropped and sent ACK (for last pkt)\n");
-   } else {
-    // discard packet and send NAK (0 bit)
-    struct pkt NAK = {0, 0, 0, 0};
-    tolayer3(1, NAK);
-
-    printf("Pkt corrupted. Dropped and sent NAK\n");
-  }
+    printf("Out of order || Corrupted rcvd\n");
+    printf("Dropped and sent ACK w/acknum=%d\n", acknum);
+   }
   printf("---------------------");
 }
 

@@ -90,3 +90,61 @@ To convince: if a data pkt is lost, the receiver will never see it and thus neve
 sees a response, and thus retransmits.
 If a response pkt is lost, the sender *also* never sees a response, and thus retransmits. This causes a duplicate pkt,
 but the receiver can detect this with seqnums and handle it.
+
+## Getting Rid of NAKs
+- In a simple stop-and-wait protocol, we can easily eliminate NAKs
+- Consider this: a NAK is only sent when a received packet has been corrupted
+- This indicates that the packet was not correctly received, and thus signals to the sender that it needs to retransmit
+the last sent packet
+- Instead of sending a NAK, however, we could just send another ACK, and somehow have this ACK function as an implicit NAK
+
+- so lets say sender sends pkt 0. rcvr sends back an ACK. sender sends pkt 1. it is corrupted, so rcvr sends back an ACK.
+sender can't tell the difference, so it sends 0, and now we have a problem.
+- now lets say sender sends pkt 0. it is corrupted. rcvr sends back an ACK (as that is the only msg it can send). sender
+views this as green light to send pkt 1. again, we have the same problem.
+
+- Clearly, we need a way to differentiate the ACKs. One way to do this is by adding "acknums" which functionally serve the
+the same purpose as seqnums, ie, they are the seqnums for acknowledgments.
+- In stop-and-wait, we will only have acknums of 0 and 1, since those are the only possible seqnums. An acknum of 0 ACKs
+a pkt with seqnum=0, and acknum=1 acks a pkt with seqnum=1
+
+- Now, lets say a sender sends pkt 0, and it's corrupted. Normally, the rcvr sends a NAK. Here, it sends an ACK with acknum=1,
+thus implicitly telling the sender: "I did not rcv pkt w/seqnum=0, I am acking for a pkt with seqnum=1 (which in this case
+is nonexistent since this is the first msg sent)
+- Now, lets say sender sends pkt 0. Rcvr sends ACK with acknum=0. This tells sender the pkt was correctly received. So sender
+moves on to send pkt 1. This is corrupted, so rcvr sends ACK with acknum=0. What this tells the sender is that: "I did not
+correctly rcv pkt1. Instead, the last correctly rcvd pkt I got had seqnum=0, so I am acking for that pkt". This then
+prompts the sender to retransmit pkt1.
+
+- Thus, by introducing acknums for acknowledgements, we can now entirely get rid of NAKs.
+- This changes a few things in the implementation:
+    - on the sender side, we now need to check explicitly for the acknum.
+    - on the receiver side, we now need to add acknums to the acknowledgement pkts
+
+### Sender states
+- Wait for call 0 from above
+    1. Got pkt 0 => send pkt 0; start timer
+    2. rcvd pkt => drop it
+- Wait for ACK w/acknum=0
+    1. Rcvd garbled OR rcvd ACK w/acknum=1 => wait for timeout
+    2. Timeout => resend pkt 0; restart timer
+    3. Rcvd ACK w/acknum=0 => stop timer; send next pkt
+- Wait for call 1 from above
+    1. Got pkt 1 => send pkt 1
+    2. rcvd pkt => drop it
+- Wait for ACK w/acknum=1
+    1. Rcvd garbled OR rcvd ACK w/acknum=0 => wait for timeout
+    2. Timeout => resend pkt; restart timer
+    3. Rcvd ACK w/acknum=1 => stop timer; send next pkt
+
+### Receiver states
+- Wait for pkt 0
+    1. Rcvd pkt 0 => deliver; send ACK w/acknum=0
+    2. Rcvd pkt 1 => drop; send ACK w/acknum=1
+    3. Rcvd garbled => drop; send ACK w/acknum=1
+- Wait for pkt 1
+    1. Rcvd pkt 1 => deliver; send ACK w/acknum=1
+    2. Rcvd pkt 0 => drop; send ACK w/acknum=0
+    3. Rcvd garbled => drop; send ACK w/acknum=0
+
+Note: see that none of the cases changed. all that we did was replace NAKs with ACKs that now have acknums
