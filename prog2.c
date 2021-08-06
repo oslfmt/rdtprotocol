@@ -36,13 +36,15 @@ struct pkt {
     };
 
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
-#define BUFSIZE 1
-#define NUMPKT 10
+#define BUFSIZE 50
+#define NUMPKT 50
+#define WINDOW_SIZE 8
 
 // sender and receiver states
 struct Sender {
   int nextseq;
-  struct pkt packet_buffer[BUFSIZE]; // for now, just holds 1 pkt b/c alternating bit only needs to store 1 pkt
+  int base;
+  struct pkt packet_buffer[BUFSIZE]; // holds 50 pkts
 } A;
 
 struct Receiver {
@@ -69,16 +71,17 @@ void update_state_A(packet)
   const struct pkt packet;
 {
   // buffer the packet just in case need to retransmit
-  A.packet_buffer[0] = packet;
-  // alternate the seqnum
-  A.nextseq = (A.nextseq + 1) % 2;
+  A.packet_buffer[packet.seqnum] = packet;
+  // increment the seqnum, not worrying about bit limit
+  A.nextseq++;
+  // A.nextseq = (A.nextseq + 1) % 2;
 }
 
 void update_state_B(packet)
   const struct pkt packet;
 {
-  // switch the next seqnum
-  B.expectedseq = (B.expectedseq + 1) % 2;
+  // increment expectedseq
+  B.expectedseq++;
   // increase num delivered && copy pkt payload
   B.pkt_seqnums_rcvd[B.num_delivered] = packet.seqnum;
   B.num_delivered++;
@@ -89,23 +92,26 @@ void update_state_B(packet)
 void A_output(message)
   struct msg message;
 {
-  // construct packet
-  struct pkt packet;
-  packet.seqnum = A.nextseq;
-  packet.acknum = A.nextseq;  // acknum does not matter in stop-n-wait; set to same as seq
-  strncpy(packet.payload, message.data, 20);
-  packet.checksum = ~compute_checksum(packet);
+  if (A.nextseq < A.base + WINDOW_SIZE) {
+    // construct packet
+    struct pkt packet;
+    packet.seqnum = A.nextseq;
+    packet.acknum = A.nextseq;
+    strncpy(packet.payload, message.data, 20);
+    packet.checksum = ~compute_checksum(packet);
 
-  // send segment to network layer
-  tolayer3(0, packet);
-  // start timer
-  starttimer(0, 7.0);
-
-  // update A state
-  update_state_A(packet);
-
-  // debug messages
-  printf("Sent packet with checksum: %d\n", packet.checksum);
+    // send pkt to network layer
+    tolayer3(0, packet);
+    // if pkt is first in window (oldest unacked), start timer
+    if (A.nextseq == A.base) {
+      starttimer(0, 8.0);
+    }
+    // update A state (increments nextseq and adds pkt to buffer)
+    update_state_A(packet);
+    printf("Sent packet with checksum: %d\n", packet.checksum);
+  } else {
+    printf("Window is full. Dropped msg.");
+  }
   printf("---------------------");
 }
 
@@ -115,19 +121,34 @@ void B_output(message)  /* need be completed only for extra credit */
   
 }
 
+/**
+ * ISSUES:
+ * Figure out the ordering of pkts on A_input()
+ */
+
 /* called from layer 3, when a packet arrives for layer 4 */
 void A_input(packet)
   struct pkt packet;
 {
+  // check the checksum
+  int result = compute_checksum(packet) + packet.checksum;
+  printf("Result checksum at A is: %d\n", result);
 
-  // if acknum != next seqnum, ie, it is equal to last sent pkt seqnum, stop timer
-  if (packet.acknum != A.nextseq) {
-    stoptimer(0);
+  // check if corrupted
+  if (result == -1 || packet.acknum >= A.base) {
+    // packet is not corrupted. 2 cases: a) ack is in-order b) ack is out-of-order
+    // increment base from pkt's acknum
+    A.base = packet.acknum + 1;
+    if (A.base == A.nextseq) {
+      stoptimer(0);
+    } else {
+      stoptimer(0);
+      starttimer(0, 8.0);
+    }
     printf("ACK received w/acknum=%d\n", packet.acknum);
     printf("Waiting to send next packet...\n");
   } else {
-    // could stop timer here, then retransmit immediately, and start new timer
-    printf("Corrupted pkt || out of order ACK Received\n");
+    printf("Corrupted or out-of-order ACK Received\n");
     printf("Waiting for timeout\n");
   }
   printf("---------------------");
@@ -136,14 +157,19 @@ void A_input(packet)
 /* called when A's timer goes off */
 void A_timerinterrupt()
 {
-  // retransmit last packet
-  struct pkt prevPacket = A.packet_buffer[0];
-  tolayer3(0, prevPacket);
-  // start timer
-  starttimer(0, 7.0);
-
+  printf("Timeout Occurred. Resending:\n");
+  // retransmit all transmitted but unack'd pkts
+  for (unsigned int i = A.base; i < A.nextseq; i++) {
+    tolayer3(0, A.packet_buffer[i]);
+    printf("pkt:%d\n", i);
+    // start timer for first sent pkt
+    if (i == A.base) {
+      starttimer(0, 8.0);
+    }
+  }
   // debug messages
-  printf("Timeout Occurred. Resending last pkt: %d\n", prevPacket.seqnum);
+  
+  printf("---------------------");
 }
 
 /* the following routine will be called once (only) before any other */
@@ -152,6 +178,8 @@ void A_init()
 {
   // set initial seqnum
   A.nextseq = 0;
+  // set base
+  A.base = 0;
 }
 
 /* Note that with simplex transfer from a-to-B, there is no B_output() */
@@ -162,7 +190,7 @@ void B_input(packet)
 {
   // check the checksum
   int result = compute_checksum(packet) + packet.checksum;
-  printf("Result checksum is: %d\n", result);
+  printf("Result checksum at B is: %d\n", result);
 
   // if uncorrupted and has expected seqnum, pass msg to layer5 and send ACK w/acknum=seqnum
   if (result == -1 && packet.seqnum == B.expectedseq) {
@@ -170,21 +198,24 @@ void B_input(packet)
     tolayer5(1, *packet.payload);
 
     struct pkt ACK = {0, packet.seqnum, 0, 1};
+    int checksum = ~compute_checksum(ACK);
+    ACK.checksum = checksum;
     tolayer3(1, ACK);
 
     update_state_B(packet);
 
     printf("Pkt received with seqnum: %d\n", packet.seqnum);
-    printf("DELIVERED TO LAYER 5 and sending ACK w/acknum=%d\n", packet.seqnum);
+    printf("DELIVERED TO LAYER 5 and sending ACK w/acknum=%d; checksum=%d\n", packet.seqnum, ACK.checksum);
   } else {
     // pkt is either corrupted OR out-of-order
-    // drop pkt and send ACK w/acknum=complement of expected seqnum
-    int acknum = (B.expectedseq + 1) % 2;
-    struct pkt ACK = {0, acknum, 0, 1};
+    // drop pkt and send ACK w/expected seqnum - 1, since that is seqnum of last delivered pkt
+    struct pkt ACK = {0, B.expectedseq - 1, 0, 1};
+    int checksum = ~compute_checksum(ACK);
+    ACK.checksum = checksum;
     tolayer3(1, ACK);
     
     printf("Out of order || Corrupted rcvd\n");
-    printf("Dropped and sent ACK w/acknum=%d\n", acknum);
+    printf("Dropped and sent ACK w/acknum=%d; checksum=%d\n", B.expectedseq - 1, ACK.checksum);
    }
   printf("---------------------");
 }
@@ -203,11 +234,9 @@ void B_init()
   B.expectedseq = 0;
   // counter to hold delivered msgs
   B.num_delivered = 0;
-  // array to hold pkts delivered to layer 5 (for checking no duplicate/missing msgs)
 }
 
 // FOR FINAL CHECKING (OPTIONAL)
-// leads to seg fault
 void check_rdt()
 {
   for (unsigned int i = 0; i < B.num_delivered; i++) {

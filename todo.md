@@ -1,4 +1,4 @@
-## TODO
+# TODO
 1. Why do we need acknums? review seqnums use in textbook
 2. Figure out acknums & seqnums (packets being delivered to receiver in correct order!)
 
@@ -148,3 +148,86 @@ prompts the sender to retransmit pkt1.
     3. Rcvd garbled => drop; send ACK w/acknum=0
 
 Note: see that none of the cases changed. all that we did was replace NAKs with ACKs that now have acknums
+
+## Go-Back-N (GBN) Protocol Implementation
+- Unidirectional transfer: data only transferred from A to B
+- WindowSize=8
+
+Basic Idea: This is a pipelined protocol. Whereas in the previous stop-and-wait protocol, the sender only sent one msg
+into the network at a time. In order to send the next pkt, the sender MUST receive some sort of feedback, or a timeout
+occurs. The problem with this protocol is that it is extremely slow, since the sender will be idle most of the time, not
+utilizing the full bandwidth available to send pkts.
+
+In order to utilize more of the bandwidth, the obvious solution is for the sender to send multiple packets into the
+network, ie, pipelining them, WITHOUT having to wait for acknowledgements. This allows more data to be sent at once, and is
+similar to batching. This is essentially what GBN does--it allows the sending of a batch of pkts (up to a limit) into the
+network at once, without waiting for acknowledgements. In "go-back-N", the N is the limit of packets that can be sent
+into the network at any given time.
+
+This introduces some complications:
+- Since we are sending batches of pkts at once now, we're going to need a larger range of seqnums, in order to know which
+pkts have been acked, as well as for the receiver to differentiate pkts. If we only had 0 and 1, and could send 10 pkts
+at once, we would have 5 0s and 5 1s, and it would make it more complicated for the receiver to know the difference between
+pkts.
+- Secondly, since we can send more pkts into the network at once, this means that any one of these pkts may get lost
+or corrupted, and thus, we may need to possibly retransmit any of the n pkts we send. Thus, for transmitting n pkts at once,
+we need to have a buffer of at least size n to properly retransmit
+- Also, since any of these pkts can now be lost, each needs a timer to track timeouts. However, as we will see later, GBN
+takes a more simplified approach with timers.
+
+Note that since we are now sending n pkts at once, we need a buffer of at least size n. In the stop-and-wait protocol,
+when sending one pkt, we needed a buffer of size 1. Thus, stop-and-wait can be viewed as a "special case" of the GBN
+protocol, where n=1.
+
+To reiterate, GBN allows the sender to transmit many packets without waiting for acknowledgements. However, GBN constrains
+this number to no more than N. Thus, at any given time, there has to be N or less transmitted but unack'd pkts.
+This number N is known as the window size.
+
+The first important fact to establish is the range of sequence numbers. Earlier, we said the range can be increased from just
+0 and 1. So, what should this range be set to exactly? In practice, I don't think it really matters, since used sequence
+numbers can later be used, since we use modulo arithmetic to wrap back around the seqnum space. At minimum, it needs to be
+larger than N. In practice, it can be set to 2^k, where k is the number of bits in the seqnum field. Thus, the range of seqnums
+becomes [0, 2^k-1].
+
+The window (possible pkts to be sent) is a slice of this sequence space. The sender has a "view" of this sequence space--think
+of it as a linear array, where the indexes are the seqnums. The window starts at 0, and goes up to N. The window has 2 bounds,
+at the lower end, we call it the *base*: this is where the window begins. Since the window represents the total possible number
+of pkts to be pipelined (not necessarily the number that are transmitted), we have an index into the window space, called
+*nextseqnum*, which is the seqnum of the next pkt to be sent.
+
+Now, at any given time, there are broadly speaking 4 sections of the sequence number space:
+1. [0, base-1]: these are the seqnums for pkts that have been sent and acked
+2. [base, nextseqnum-1]: seqnums for pkts that have been sent but not yet acked
+3. [nextseqnum, base+N-1]: seqnums for pkts that can be sent (immediately) but have not been sent yet
+4. >=base+N: seqnums that are unusable (until base has been acked)
+
+Thus, as pkts are acked, the window essentially slides forward, thus allowing more pkts to be sent. However, the window
+keeps a hard maximum on the number ot transmitted but unack'd packets. One final thing to address is that since there is a
+maximum seqnum, what happens if we have more packets than seqnums? Well, this is not an issue since arithmetic is done with
+mod 2^k. Thus, the seqnums wrap around to the beginning of the space when the max is reached.
+
+### Sender Events
+GBN can be viewed as an event-based protocol. The sender is essentially always in a "wait" state, listening to certain events
+to occur. When an event occurs, the sender performs an action. This is in contrast to the previous protocols that had
+various states. There are 3 main events:
+
+- Wait for call from above
+    1. if window is full, drop; else, send pkt
+- Wait for acknowledgement
+    1. On receipt of an (uncorrupted) ACK, check seqnum
+- Timeout
+    1. resend all transmitted but unack'd pkts--at maximum, this can be N pkts, which is why protocol is called "go-back-N"
+
+- Additionally the sender must keep track of the following:
+    - A buffer (for retransmissions, and to hold pkts)
+    - base: the window base
+    - nextseqnum: the seqnum to use for the next sent pkt
+    - N: the windowsize (is 8 in this case)
+
+### Receiver Events
+The receiver is also in a wait state and waits for events to occur:
+
+- Uncorrupted, in-sequence pkt received
+    1. deliver msg; send ACK with proper acknum; increment expectedseqnum
+- All other events
+    1. drop pkt; send ACK with acknum=last_rcvd_pkt_acknum
